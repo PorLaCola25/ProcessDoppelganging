@@ -1,6 +1,6 @@
-# ProcessDoppleganging
+# ProcessDoppelganging
 
-Process doppleganging POC using direct system calls and dropbox as an external delivery channel for the payload.
+Process doppelganging POC using direct system calls and dropbox as an external delivery channel for the payload.
 
 Payload has to be a base64 encoded executable file, I use the following code to generate the payloads:
 
